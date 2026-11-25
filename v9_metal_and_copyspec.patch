@@ -1,0 +1,201 @@
+diff --git a/dflash_mlx/__init__.py b/dflash_mlx/__init__.py
+index 511690a..77a6c8b 100644
+--- a/dflash_mlx/__init__.py
++++ b/dflash_mlx/__init__.py
+@@ -2,4 +2,14 @@
+ # Licensed under the Apache License, Version 2.0 - see LICENSE file
+ # Based on DFlash (arXiv:2602.06036)
+ 
+-__version__ = "0.1.10"
++from dflash_mlx.draft import (
++    Eagle4DraftModel,
++    Eagle4DraftModelArgs,
++    EagleProposal,
++    has_eagle4_architecture,
++    normalize_eagle4_config,
++    Eagle4DraftBackend,
++    create_eagle4_backend,
++)
++
++__version__ = "0.1.11"
+\ No newline at end of file
+diff --git a/dflash_mlx/draft/__init__.py b/dflash_mlx/draft/__init__.py
+index 8aae95e..31cf33f 100644
+--- a/dflash_mlx/draft/__init__.py
++++ b/dflash_mlx/draft/__init__.py
+@@ -1,3 +1,22 @@
+ # Copyright 2026 bstnxbt
+ # Licensed under the Apache License, Version 2.0 - see LICENSE file
+ # Based on DFlash (arXiv:2602.06036)
++
++from dflash_mlx.draft.eagle_drafter import (
++    Eagle4DraftModel,
++    Eagle4DraftModelArgs,
++    EagleProposal,
++    has_eagle4_architecture,
++    normalize_eagle4_config,
++)
++from dflash_mlx.draft.eagle_backend import Eagle4DraftBackend, create_eagle4_backend
++
++__all__ = [
++    "Eagle4DraftModel",
++    "Eagle4DraftModelArgs",
++    "EagleProposal",
++    "has_eagle4_architecture",
++    "normalize_eagle4_config",
++    "Eagle4DraftBackend",
++    "create_eagle4_backend",
++]
+\ No newline at end of file
+diff --git a/dflash_mlx/engine/target_qwen_gdn.py b/dflash_mlx/engine/target_qwen_gdn.py
+index 8efb036..e412081 100644
+--- a/dflash_mlx/engine/target_qwen_gdn.py
++++ b/dflash_mlx/engine/target_qwen_gdn.py
+@@ -31,7 +31,7 @@ from dflash_mlx.recurrent_rollback_cache import RecurrentRollbackCache
+ 
+ _HYBRID_SDPA_EXACT_KV_THRESHOLD = 128
+ # DFLASH_SPLITK_ATTN=1: split-K attention for verify steps over >= 4k keys (engine/splitk_attention.py)
+-_SPLITK_ATTN = os.environ.get("DFLASH_SPLITK_ATTN", "0").strip().lower() in ("1", "true", "on", "yes")
++_SPLITK_ATTN = os.environ.get("DFLASH_SPLITK_ATTN", "1").strip().lower() in ("1", "true", "on", "yes")
+ _TREE_POSITIONS_ATTR = "_dflash_tree_positions"
+ _TREE_PARENT_IDS_ATTR = "_dflash_tree_parent_ids"
+ _TREE_ATTENTION_MASK_ATTR = "_dflash_tree_attention_mask"
+diff --git a/dflash_mlx/runtime/bundle.py b/dflash_mlx/runtime/bundle.py
+index f6708e9..3117a3f 100644
+--- a/dflash_mlx/runtime/bundle.py
++++ b/dflash_mlx/runtime/bundle.py
+@@ -5,10 +5,13 @@
+ from __future__ import annotations
+ 
+ from dataclasses import dataclass
++import os
+ from pathlib import Path
+ from typing import Any
+ 
+ from dflash_mlx.draft_backend import DraftBackend, EagerDraftBackend
++from dflash_mlx.draft.eagle_backend import Eagle4DraftBackend, create_eagle4_backend
++from dflash_mlx.draft.eagle_drafter import Eagle4DraftModel, has_eagle4_architecture
+ from dflash_mlx.engine.target_ops import TargetOps, bind_draft_to_target
+ from dflash_mlx.runtime import VerifyConfig
+ from dflash_mlx.runtime.loading import (
+@@ -97,7 +100,16 @@ def load_runtime_bundle(
+         if effective_draft_quant is not None
+         else "none"
+     )
+-    draft_backend = EagerDraftBackend()
++
++    use_eagle4 = (
++        isinstance(draft_model, Eagle4DraftModel)
++        or has_eagle4_architecture(getattr(draft_model, "config", None) or draft_meta.get("config") or {})
++        or os.environ.get("DFLASH_EAGLE4", "0").strip().lower() in ("1", "true", "on", "yes")
++    )
++    if use_eagle4:
++        draft_backend = create_eagle4_backend(verify_config=verify_config)
++    else:
++        draft_backend = EagerDraftBackend()
+     bind_draft_to_target(draft_model, target_model, target_ops=target_ops)
+     return RuntimeBundle(
+         target_model=target_model,
+diff --git a/dflash_mlx/runtime/loading.py b/dflash_mlx/runtime/loading.py
+index cde79e7..267797e 100644
+--- a/dflash_mlx/runtime/loading.py
++++ b/dflash_mlx/runtime/loading.py
+@@ -23,6 +23,16 @@ from dflash_mlx.model import (
+     DFlashDraftModel,
+     DFlashDraftModelArgs,
+ )
++from dflash_mlx.draft.eagle_drafter import (
++    Eagle4DraftModel,
++    Eagle4DraftModelArgs,
++    has_eagle4_architecture,
++    normalize_eagle4_config,
++)
++from dflash_mlx.draft.dflash2 import (
++    has_dflash2_architecture,
++    normalize_dflash2_config,
++)
+ from dflash_mlx.runtime import VerifyConfig
+ from dflash_mlx.runtime.chip_detect import ChipProfile, detect_chip
+ 
+@@ -51,7 +61,13 @@ def resolve_model_ref(model_ref: str | Path | None, *, kind: str) -> str:
+ 
+ def _get_dflash_model_classes(config: dict[str, Any]):
+     from dflash_mlx.draft.checkpoint import get_draft_model_classes
++    from dflash_mlx.draft.dflash2 import DFlash2DraftModel, DFlash2DraftModelArgs
++    from dflash_mlx.draft.eagle_drafter import Eagle4DraftModel, Eagle4DraftModelArgs
+ 
++    if has_eagle4_architecture(config):
++        return Eagle4DraftModel, Eagle4DraftModelArgs
++    if has_dflash2_architecture(config):
++        return DFlash2DraftModel, DFlash2DraftModelArgs
+     return get_draft_model_classes(config)
+ 
+ 
+@@ -268,6 +284,17 @@ def load_draft_bundle(
+     resolved_ref = resolve_model_ref(model_ref, kind="draft")
+     model_path = _resolve_local_model_path(resolved_ref)
+     _raise_if_unsupported_draft_lm_head(model_path, str(resolved_ref))
++
++    config_path = model_path / "config.json"
++    config = json.loads(config_path.read_text())
++
++    if has_eagle4_architecture(config):
++        config = normalize_eagle4_config(config)
++        (model_path / "config.json").write_text(json.dumps(config, indent=2))
++    elif has_dflash2_architecture(config):
++        config = normalize_dflash2_config(config)
++        (model_path / "config.json").write_text(json.dumps(config, indent=2))
++
+     model, config = load_model(
+         model_path,
+         lazy=lazy,
+@@ -281,7 +308,11 @@ def load_draft_bundle(
+             def _quant_pred(path: str, m: nn.Module):
+                 if not hasattr(m, "to_quantized"):
+                     return False
+-                if path.startswith("candidate_selector") or path.endswith("kernel_projection"):
++                if (path.startswith("candidate_selector") or
++                    path.endswith("kernel_projection") or
++                    path.startswith("feature_prediction") or
++                    path.startswith("feature_fusion") or
++                    path.startswith("draft_tree")):
+                     return {"bits": 8, "group_size": quant_spec.group_size}
+                 return {"bits": 4, "group_size": quant_spec.group_size}
+             nn.quantize(model, class_predicate=_quant_pred)
+diff --git a/dflash_mlx/runtime/registry.py b/dflash_mlx/runtime/registry.py
+index e384982..e466cfc 100644
+--- a/dflash_mlx/runtime/registry.py
++++ b/dflash_mlx/runtime/registry.py
+@@ -53,6 +53,10 @@ MODEL_SUPPORT_SPECS: tuple[ModelSupportSpec, ...] = (
+     ModelSupportSpec(
+         ("Ternary-Bonsai-2-27B",), "naklitechie/Qwen3.8-27B-DFlash2-ternary-bonsai2", "hybrid_gdn", W4_DEFAULTS
+     ),
++    # EAGLE 4 drafter for Ternary-Bonsai-2-27B - feature-level autoregressive speculative decoding
++    ModelSupportSpec(
++        ("Ternary-Bonsai-2-27B-EAGLE4",), "z-lab/Qwen3.8-27B-EAGLE4", "hybrid_gdn", W4_DEFAULTS
++    ),
+     ModelSupportSpec(("Qwen3-4B",), "z-lab/Qwen3-4B-DFlash-b16", "pure_attention"),
+     ModelSupportSpec(("Qwen3-8B",), "z-lab/Qwen3-8B-DFlash-b16", "pure_attention"),
+     ModelSupportSpec(
+@@ -132,6 +136,8 @@ def resolve_effective_draft_quant(
+         return requested
+     if support_spec is None or not support_spec.defaults.draft_quant:
+         return None
++    if resolved_draft_ref and resolved_draft_ref != support_spec.draft_ref:
++        return None
+     return support_spec.defaults.draft_quant
+ 
+ 
+diff --git a/tests/test_runtime_bundle.py b/tests/test_runtime_bundle.py
+index e21fcc3..b3a733a 100644
+--- a/tests/test_runtime_bundle.py
++++ b/tests/test_runtime_bundle.py
+@@ -24,6 +24,8 @@ EXPECTED_DRAFT_REGISTRY = {
+     "Qwen3.6-27B": "z-lab/Qwen3.6-27B-DFlash",
+     "Qwen3.6-35B-A3B": "z-lab/Qwen3.6-35B-A3B-DFlash",
+     "Qwen3.8-27B": "z-lab/Qwen3.8-27B-DFlash2",
++    "Ternary-Bonsai-2-27B": "naklitechie/Qwen3.8-27B-DFlash2-ternary-bonsai2",
++    "Ternary-Bonsai-2-27B-EAGLE4": "z-lab/Qwen3.8-27B-EAGLE4",
+     "Qwen3-4B": "z-lab/Qwen3-4B-DFlash-b16",
+     "Qwen3-8B": "z-lab/Qwen3-8B-DFlash-b16",
+     "gemma-4-31b-it": "z-lab/gemma-4-31B-it-DFlash",
